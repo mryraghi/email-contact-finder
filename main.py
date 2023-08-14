@@ -22,21 +22,27 @@ headers = {
 }
 
 
-def is_valid_xml(sitemap_url):
+def fetch_url(url):
     try:
-        response = requests.get(sitemap_url, headers=headers, verify=False)
+        response = requests.get(url, headers=headers, verify=False)
+        response.raise_for_status()  # This will raise an HTTPError if the HTTP request returned an unsuccessful status code
+        return response
+    except Exception as e:
+        print(f"Error fetching {url}: {e}")
+        return None
+
+
+def is_valid_xml(sitemap_url):
+    response = fetch_url(sitemap_url)
+    if response:
         try:
             # Attempt to parse the content as XML
             ET.ElementTree(ET.fromstring(response.content))
             return True
         except ET.ParseError:
+            print(f"Error parsing XML for {sitemap_url}")
             return False
-    except (
-        requests.exceptions.RequestException,
-        socket.gaierror,
-        requests.exceptions.SSLError,
-    ) as e:
-        return False
+    return False
 
 
 def get_sitemap_link(website, depth=0):
@@ -110,31 +116,31 @@ def get_sitemap_link(website, depth=0):
     return None
 
 
-def get_contact_link(sitemap, website):
+def get_contact_link(website):
     # if sitemap is defined
-    if sitemap is not None:
-        try:
-            response = requests.get(sitemap, headers=headers, verify=False)
-            if response.status_code == 200:
-                soup = BeautifulSoup(response.text, "lxml-xml")
-                links = soup.find_all("loc")
-                link_texts = "\n- ".join([link.text for link in links])
+    # if sitemap is not None:
+    #     try:
+    #         response = requests.get(sitemap, headers=headers, verify=False)
+    #         if response.status_code == 200:
+    #             soup = BeautifulSoup(response.text, "lxml-xml")
+    #             links = soup.find_all("loc")
+    #             link_texts = "\n- ".join([link.text for link in links])
 
-                # print("links", get_contact_url_from_list_of_urls(link_texts))
+    #             # print("links", get_contact_url_from_list_of_urls(link_texts))
 
-                for link in links:
-                    if "contact" in link.text:
-                        submit_contact_form(link.text)
-                        return link.text
-                    elif link.text.endswith(".xml"):  # if the link is another sitemap
-                        return get_contact_link(link.text, website)
-        except (
-            requests.exceptions.RequestException,
-            socket.gaierror,
-            requests.exceptions.SSLError,
-        ) as e:
-            print("")
-            # continue to try /contact and /contact-us directly
+    #             for link in links:
+    #                 if "contact" in link.text:
+    #                     submit_contact_form(link.text)
+    #                     return link.text
+    #                 elif link.text.endswith(".xml"):  # if the link is another sitemap
+    #                     return get_contact_link(link.text, website)
+    #     except (
+    #         requests.exceptions.RequestException,
+    #         socket.gaierror,
+    #         requests.exceptions.SSLError,
+    #     ) as e:
+    #         print("")
+    #         # continue to try /contact and /contact-us directly
 
     # try /contact and /contact-us directly
     for page in [
@@ -242,7 +248,9 @@ def submit_contact_form(url):
         print("Contact Us form not found")
 
 
-def process_website(website):
+def process_website(row):
+    website = row["Website-href"]
+
     extracted = tldextract.extract(str(website))
     domain_name = (
         f"http://{extracted.subdomain}.{extracted.domain}.{extracted.suffix}"
@@ -256,8 +264,8 @@ def process_website(website):
     )
 
     addresses = get_contact_info(domain_name)
-    sitemap_link = get_sitemap_link(domain_name)
-    contact_link = get_contact_link(sitemap_link, naked_domain_name)
+    # sitemap_link = get_sitemap_link(domain_name)
+    contact_link = get_contact_link(naked_domain_name)
 
     if contact_link:
         other_addresses = get_contact_info(contact_link)
@@ -265,11 +273,10 @@ def process_website(website):
 
     # remove duplicates
     addresses = list(set(addresses))
-    print("addresses", addresses)
-    return ";".join(addresses)
+    print("=> addresses", addresses)
+    row["contact_email"] = ";".join(addresses)
+    return row
 
-
-email_list = []
 
 if __name__ == "__main__":
     if len(sys.argv) != 2:
@@ -278,16 +285,21 @@ if __name__ == "__main__":
 
     df = pd.read_csv(sys.argv[1])
 
+    # Prepare the output file and write the headers
+    output_file = f"{sys.argv[1].split('.')[0]}_output.csv"
+    with open(output_file, "w") as f:
+        f.write(",".join(df.columns) + ",contact_email\n")
+    # Assuming df.columns doesn't include 'contact_email'
+
     # Create a multiprocessing Pool
     with Pool(processes=cpu_count()) as pool:
-        email_list = list(
-            tqdm(
-                pool.imap(process_website, df["Website-href"]),
-                total=len(df["Website-href"]),
-                desc="Processing websites",
-                unit="website",
-            )
-        )
-
-    df["contact_email"] = email_list
-    df.to_csv(f"{sys.argv[1].split('.')[0]}_output.csv", index=False)
+        for processed_row in tqdm(
+            pool.imap(process_website, df.to_dict("records")),
+            total=len(df),
+            desc="Processing websites",
+            unit="website",
+        ):
+            print(processed_row)
+            # Write processed email to the output file
+            with open(output_file, "a") as f:
+                f.write(",".join(map(str, processed_row.values())) + "\n")
